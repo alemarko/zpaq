@@ -1,10 +1,10 @@
 Added support for pipe output, example use:
 
 # append output to log file
-zpaq x archive.zpaq file_in_arhive -topipe -logfile log_file -logappend
+zpaq x archive.zpaq file_in_archive -topipe -logfile log_file -logappend
 
 # don't care about logging
-zpaq x archive.zpaq file_in_arhive -topipe -logfile /dev/null
+zpaq x archive.zpaq file_in_archive -topipe -logfile /dev/null
 
 
 
