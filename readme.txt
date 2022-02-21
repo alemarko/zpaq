@@ -1,3 +1,14 @@
+Added support for pipe output, example use:
+
+# append output to log file
+zpaq x archive.zpaq file_in_arhive -topipe -logfile log_file -logappend
+
+# don't care about logging
+zpaq x archive.zpaq file_in_arhive -topipe -logfile /dev/null
+
+
+
+
 zpaq715.zip, Aug. 17, 2016.
 
 zpaq is a journaling archiver optimized for user-level incremental

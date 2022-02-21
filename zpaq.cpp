@@ -268,26 +268,6 @@ std::wstring utow(const char* ss, char slash='\\') {
 }
 #endif
 
-// Print a UTF-8 string to f (stdout, stderr) so it displays properly
-void printUTF8(const char* s, FILE* f=stdout) {
-  assert(f);
-  assert(s);
-#ifdef unix
-  fprintf(f, "%s", s);
-#else
-  const HANDLE h=(HANDLE)_get_osfhandle(_fileno(f));
-  DWORD ft=GetFileType(h);
-  if (ft==FILE_TYPE_CHAR) {
-    fflush(f);
-    std::wstring w=utow(s, '/');  // Windows console: convert to UTF-16
-    DWORD n=0;
-    WriteConsole(h, w.c_str(), w.size(), &n, 0);
-  }
-  else  // stdout redirected to file
-    fprintf(f, "%s", s);
-#endif
-}
-
 // Return relative time in milliseconds
 int64_t mtime() {
 #ifdef unix
@@ -383,6 +363,7 @@ const char* const RB="rb";
 const char* const WB="wb";
 const char* const RBPLUS="rb+";
 const char* const WBPLUS="wb+";
+const char* const AB="ab";
 
 #else // Windows
 typedef HANDLE FP;
@@ -478,28 +459,52 @@ void printerr(const char* filename) {
 
 // Print last error message
 void printerr(const char* filename) {
-  fflush(stdout);
+  fflush(global_log_file);
   int err=GetLastError();
   printUTF8(filename, stderr);
   if (err==ERROR_FILE_NOT_FOUND)
-    fprintf(stderr, ": file not found\n");
+    fprintf(global_error_file, ": file not found\n");
   else if (err==ERROR_PATH_NOT_FOUND)
-    fprintf(stderr, ": path not found\n");
+    fprintf(global_error_file, ": path not found\n");
   else if (err==ERROR_ACCESS_DENIED)
-    fprintf(stderr, ": access denied\n");
+    fprintf(global_error_file, ": access denied\n");
   else if (err==ERROR_SHARING_VIOLATION)
-    fprintf(stderr, ": sharing violation\n");
+    fprintf(global_error_file, ": sharing violation\n");
   else if (err==ERROR_BAD_PATHNAME)
-    fprintf(stderr, ": bad pathname\n");
+    fprintf(global_error_file, ": bad pathname\n");
   else if (err==ERROR_INVALID_NAME)
-    fprintf(stderr, ": invalid name\n");
+    fprintf(global_error_file, ": invalid name\n");
   else if (err==ERROR_NETNAME_DELETED)
-    fprintf(stderr, ": network name no longer available\n");
+    fprintf(global_error_file, ": network name no longer available\n");
   else
-    fprintf(stderr, ": Windows error %d\n", err);
+    fprintf(global_error_file, ": Windows error %d\n", err);
 }
 
 #endif
+
+// Global variables
+FP global_log_file;  // it will be either file from argument above or stdout otherwise
+FP global_error_file;  // it will be either file from argument above or stderr otherwise
+
+// Print a UTF-8 string to f (stdout, stderr) so it displays properly
+void printUTF8(const char* s, FILE* f=global_log_file) {
+  assert(f);
+  assert(s);
+#ifdef unix
+  fprintf(f, "%s", s);
+#else
+  const HANDLE h=(HANDLE)_get_osfhandle(_fileno(f));
+  DWORD ft=GetFileType(h);
+  if (ft==FILE_TYPE_CHAR) {
+    fflush(f);
+    std::wstring w=utow(s, '/');  // Windows console: convert to UTF-16
+    DWORD n=0;
+    WriteConsole(h, w.c_str(), w.size(), &n, 0);
+  }
+  else  // stdout redirected to file
+    fprintf(f, "%s", s);
+#endif
+}
 
 // Close fp if open. Set date and attributes unless 0
 void close(const char* filename, int64_t date, int64_t attr, FP fp=FPNULL) {
@@ -1042,6 +1047,9 @@ private:
   bool dotest;              // -test option
   int threads;              // default is number of cores
   vector<string> tofiles;   // -to option
+  bool topipe;              // -topipe option
+  string logfile;           // -logfile option
+  bool logappend;           // -logappend append to log, otherwise truncate
   int64_t date;             // now as decimal YYYYMMDDHHMMSS (UT)
   int64_t version;          // version number or 14 digit date
 
@@ -1074,7 +1082,7 @@ private:
 
 // Print help message
 void Jidac::usage() {
-  printf(
+  fprintf(global_log_file, 
 "Usage: zpaq command archive[.zpaq] files... -options...\n"
 "Files... may be directory trees. Default is the whole archive.\n"
 "Use * or \?\?\?\? in archive name for multi-part or \"\" for empty.\n"
@@ -1101,6 +1109,9 @@ void Jidac::usage() {
 "  -test           Extract: verify but do not write files.\n"
 "  -tN -threads N  Use N threads (default: 0 = %d cores).\n"
 "  -to out...      Rename files... to out... or all to out/all.\n"
+"  -topipe         Outputs file to pipe (requires option -logfile to be used).\n"
+"  -logfile LF     Log file which will be used for both standard output and error.\n"
+"  -logappend      Used with -logfile to choose if the file will be appended or truncated (defult).\n"
 "  -until N        Roll back archive to N'th update or -N from end.\n"
 "  -until %s  Set date, roll back (UT, default time: 235959).\n"
 #ifndef NDEBUG
@@ -1181,9 +1192,7 @@ int Jidac::doCommand(int argc, const char** argv) {
   version=DEFAULT_VERSION;
   date=0;
 
-  printf("zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
-         __DATE__ "\n");
-
+  
   // Init archive state
   ht.resize(1);  // element 0 not used
   ver.resize(1); // version 0
@@ -1194,6 +1203,33 @@ int Jidac::doCommand(int argc, const char** argv) {
   tm* t=gmtime(&now);
   date=(t->tm_year+1900)*10000000000LL+(t->tm_mon+1)*100000000LL
       +t->tm_mday*1000000+t->tm_hour*10000+t->tm_min*100+t->tm_sec;
+
+  
+  logappend = false;
+  topipe = false;
+  for (int i=1; i<argc; ++i) {
+    const string opt=argv[i];
+        if (opt=="-logfile") logfile = argv[++i];
+    else if (opt=="-logappend") logappend = true;
+    else if (opt=="-topipe") {
+      topipe=true;
+      tofiles.push_back("dummy"); // we have logic depending on this flag
+    }
+  }
+
+  if (logfile == "") {
+    if (topipe) {
+      fprintf(stdout, "Option '-topipe' requires option '-logfile' to be set.\n");
+      exit(1);
+    }
+    global_log_file = stdout;
+    global_error_file = stderr;
+  }
+  else {
+    makepath(logfile);
+    global_log_file = fopen(logfile.c_str(), logappend ? AB : WB);
+    global_error_file = global_log_file;
+  }
 
   // Get optional options
   for (int i=1; i<argc; ++i) {
@@ -1252,6 +1288,9 @@ int Jidac::doCommand(int argc, const char** argv) {
     else if (opt=="-summary" && i<argc-1) summary=atoi(argv[++i]);
     else if (opt[1]=='s') summary=atoi(argv[i]+2);
     else if (opt=="-test") dotest=true;
+    else if (opt=="-topipe") ;    // we already used the value
+    else if (opt=="-logfile") ++i;  // we already used the value
+    else if (opt=="-logappend") ; // we already used the value
     else if (opt=="-to") {  // read tofiles
       while (++i<argc && argv[i][0]!='-')
         tofiles.push_back(argv[i]);
@@ -1287,6 +1326,9 @@ int Jidac::doCommand(int argc, const char** argv) {
         --i;
       }
 
+      fprintf(global_log_file, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
+         __DATE__ "\n");
+
       // Append default time
       if (version>=19000000LL     && version<=29991231LL)
         version=version*100+23;
@@ -1296,8 +1338,8 @@ int Jidac::doCommand(int argc, const char** argv) {
         version=version*100+59;
       if (version>9999999) {
         if (version<19000101000000LL || version>29991231235959LL) {
-          fflush(stdout);
-          fprintf(stderr,
+          fflush(global_log_file);
+          fprintf(global_error_file,
             "Version date %1.0f must be 19000101000000 to 29991231235959\n",
              double(version));
           exit(1);
@@ -1306,10 +1348,12 @@ int Jidac::doCommand(int argc, const char** argv) {
       }
     }
     else {
-      printf("Unknown option ignored: %s\n", argv[i]);
+      fprintf(global_log_file, "Unknown option ignored: %s\n", argv[i]);
       usage();
     }
   }
+
+
 
   // Set threads
   if (threads<1) threads=numberOfProcessors();
@@ -1324,7 +1368,7 @@ int Jidac::doCommand(int argc, const char** argv) {
     jidac.version=DEFAULT_VERSION;
     jidac.read_archive(archive.c_str());
     version+=jidac.ver.size()-1;
-    printf("Version %1.0f\n", version+.0);
+    fprintf(global_log_file, "Version %1.0f\n", version+.0);
   }
 
   // Load dynamic functions in Windows Vista and later
@@ -1338,7 +1382,7 @@ int Jidac::doCommand(int argc, const char** argv) {
       (FindNextStreamW_t)GetProcAddress(h, "FindNextStreamW");
   }
   if (!findFirstStreamW || !findNextStreamW)
-    printf("Alternate streams not supported in Windows XP.\n");
+    fprintf(global_log_file, "Alternate streams not supported in Windows XP.\n");
 #endif
 
   // Execute command
@@ -1363,17 +1407,17 @@ int64_t Jidac::read_archive(const char* arc, int *errors) {
   InputArchive in(arc, password);
   if (!in.isopen()) {
     if (command!='a') {
-      fflush(stdout);
-      printUTF8(arc, stderr);
-      fprintf(stderr, " not found.\n");
+      fflush(global_log_file);
+      printUTF8(arc, global_error_file);
+      fprintf(global_error_file, " not found.\n");
       if (errors) ++*errors;
     }
     return 0;
   }
   printUTF8(arc);
-  if (version==DEFAULT_VERSION) printf(": ");
-  else printf(" -until %1.0f: ", version+0.0);
-  fflush(stdout);
+  if (version==DEFAULT_VERSION) fprintf(global_log_file, ": ");
+  else fprintf(global_log_file, " -until %1.0f: ", version+0.0);
+  fflush(global_log_file);
 
   // Test password
   {
@@ -1474,7 +1518,7 @@ int64_t Jidac::read_archive(const char* arc, int *errors) {
               data_offset=in.tell()+1-d.buffered();
               const char* s=os.c_str();
               int64_t jmp=btol(s);
-              if (jmp<0) printf("Incomplete transaction ignored\n");
+              if (jmp<0) fprintf(global_log_file, "Incomplete transaction ignored\n");
               if (jmp<0
                   || (version<19000000000000LL && int64_t(ver.size())>version)
                   || (version>=19000000000000LL && version<fdate)) {
@@ -1516,8 +1560,8 @@ int64_t Jidac::read_archive(const char* arc, int *errors) {
               dhsize+=bsize;
               assert(ver.size()>0);
               if (int64_t(ht.size())>num) {
-                fflush(stdout);
-                fprintf(stderr,
+                fflush(global_log_file);
+                fprintf(global_error_file,
                   "Unordered fragment tables: expected >= %d found %1.0f\n",
                   int(ht.size()), double(num));
               }
@@ -1581,7 +1625,7 @@ int64_t Jidac::read_archive(const char* arc, int *errors) {
               }  // end while more files
             }  // end if 'i'
             else {
-              printf("Skipping %s %s\n",
+              fprintf(global_log_file, "Skipping %s %s\n",
                   filename.s.c_str(), comment.s.c_str());
               error("Unexpected journaling block");
             }
@@ -1634,8 +1678,8 @@ int64_t Jidac::read_archive(const char* arc, int *errors) {
     }  // end try
     catch (std::exception& e) {
       in.seek(-d.buffered(), SEEK_CUR);
-      fflush(stdout);
-      fprintf(stderr, "Skipping block at %1.0f: %s\n", double(block_offset),
+      fflush(global_log_file);
+      fprintf(global_error_file, "Skipping block at %1.0f: %s\n", double(block_offset),
               e.what());
       if (errors) ++*errors;
     }
@@ -1643,7 +1687,7 @@ endblock:;
   }  // end while !done
   if (in.tell()>32*(password!=0) && !found_data)
     error("archive contains no data");
-  printf("%d versions, %u files, %u fragments, %1.6f MB\n", 
+  fprintf(global_log_file, "%d versions, %u files, %u fragments, %1.6f MB\n", 
       int(ver.size()-1), files, unsigned(ht.size())-1,
       block_offset/1000000.0);
 
@@ -1822,9 +1866,9 @@ void print_progress(int64_t ts, int64_t td, int sum) {
   if (td>ts) td=ts;
   if (td>=1000000) {
     double eta=0.001*(mtime()-global_start)*(ts-td)/(td+1.0);
-    printf("%5.2f%% %d:%02d:%02d ", td*100.0/(ts+0.5),
+    fprintf(global_log_file, "%5.2f%% %d:%02d:%02d ", td*100.0/(ts+0.5),
        int(eta/3600), int(eta/60)%60, int(eta)%60);
-    if (sum>0) printf("\r"), fflush(stdout);
+    if (sum>0) fprintf(global_log_file, "\r"), fflush(global_log_file);
   }
 }
 
@@ -1956,8 +2000,8 @@ ThreadReturn compressThread(void* arg) {
   }
   catch (std::exception& e) {
     lock(job.mutex);
-    fflush(stdout);
-    fprintf(stderr, "job %d: %s\n", jobNumber+1, e.what());
+    fflush(global_log_file);
+    fprintf(global_error_file, "job %d: %s\n", jobNumber+1, e.what());
     release(job.mutex);
     exit(1);
   }
@@ -2009,8 +2053,8 @@ ThreadReturn writeThread(void* arg) {
     }
   }
   catch (std::exception& e) {
-    fflush(stdout);
-    fprintf(stderr, "zpaq exiting from writeThread: %s\n", e.what());
+    fflush(global_log_file);
+    fprintf(global_error_file, "zpaq exiting from writeThread: %s\n", e.what());
     exit(1);
   }
   return 0;
@@ -2127,8 +2171,8 @@ int Jidac::add() {
     header_pos=32*(password && offset==0);
     arcname=subpart(archive, ver.size());
     if (exists(arcname.c_str())) {
-      printUTF8(arcname.c_str(), stderr);
-      fprintf(stderr, ": archive exists\n");
+      printUTF8(arcname.c_str(), global_error_file);
+      fprintf(global_error_file, ": archive exists\n");
       error("archive exists");
     }
     if (password) {  // derive archive salt from index
@@ -2174,10 +2218,10 @@ int Jidac::add() {
       }
     }
   }
-  if (exists(arcname.c_str())) printf("Updating ");
-  else printf("Creating ");
+  if (exists(arcname.c_str())) fprintf(global_log_file, "Updating ");
+  else fprintf(global_log_file, "Creating ");
   printUTF8(arcname.c_str());
-  printf(" at offset %1.0f + %1.0f\n", double(header_pos), double(offset));
+  fprintf(global_log_file, " at offset %1.0f + %1.0f\n", double(header_pos), double(offset));
 
   // Set method
   if (method=="") method="1";
@@ -2258,7 +2302,7 @@ int Jidac::add() {
   vector<ThreadID> tid(threads*2-1);
   ThreadID wid;
   CompressJob job(threads, tid.size(), &out);
-  printf(
+  fprintf(global_log_file, 
       "Adding %1.6f MB in %d files -method %s -threads %d at %s.\n",
       total_size/1000000.0, int(vf.size()), method.c_str(), threads,
       dateToString(date).c_str());
@@ -2274,9 +2318,9 @@ int Jidac::add() {
       DTMap::iterator p=vf[fi];
       print_progress(total_size, total_done, summary);
       if (summary<=0) {
-        printf("+ ");
+        fprintf(global_log_file, "+ ");
         printUTF8(p->first.c_str());
-        printf(" %1.0f\n", p->second.size+0.0);
+        fprintf(global_log_file, " %1.0f\n", p->second.size+0.0);
       }
       FP in=fopen(p->first.c_str(), RB);
       if (in==FPNULL) {
@@ -2320,7 +2364,7 @@ int Jidac::add() {
 
     // Done
     const int64_t outsize=out.tell();
-    printf("%1.0f + (%1.0f -> %1.0f) = %1.0f\n",
+    fprintf(global_log_file, "%1.0f + (%1.0f -> %1.0f) = %1.0f\n",
         double(header_pos),
         double(total_size),
         double(outsize-header_pos),
@@ -2332,8 +2376,8 @@ int Jidac::add() {
   // Adjust date to maintain sequential order
   if (ver.size() && ver.back().lastdate>=date) {
     const int64_t newdate=decimal_time(unix_time(ver.back().lastdate)+1);
-    fflush(stdout);
-    fprintf(stderr, "Warning: adjusting date from %s to %s\n",
+    fflush(global_log_file);
+    fprintf(global_error_file, "Warning: adjusting date from %s to %s\n",
       dateToString(date).c_str(), dateToString(newdate).c_str());
     assert(newdate>date);
     date=newdate;
@@ -2505,7 +2549,7 @@ int Jidac::add() {
           string fn="jDC"+itos(date, 14)+"d"+itos(ht.size()-frags, 10);
           print_progress(total_size, total_done, summary);
           if (summary<=0)
-            printf("[%u..%u] %u -method %s\n",
+            fprintf(global_log_file, "[%u..%u] %u -method %s\n",
                 unsigned(ht.size())-frags, unsigned(ht.size())-1,
                 unsigned(sb.size()), m.c_str());
           if (method[0]!='i')
@@ -2552,16 +2596,16 @@ int Jidac::add() {
       if (summary<=0) {
         string newname=rename(p->first.c_str());
         DTMap::iterator a=dt.find(newname);
-        if (a==dt.end() || a->second.date==0) printf("+ ");
-        else printf("# ");
+        if (a==dt.end() || a->second.date==0) fprintf(global_log_file, "+ ");
+        else fprintf(global_log_file, "# ");
         printUTF8(p->first.c_str());
         if (newname!=p->first) {
-          printf(" -> ");
+          fprintf(global_log_file, " -> ");
           printUTF8(newname.c_str());
         }
-        printf(" %1.0f", p->second.size+0.0);
-        if (fsize!=p->second.size) printf(" -> %1.0f", fsize+0.0);
-        printf("\n");
+        fprintf(global_log_file, " %1.0f", p->second.size+0.0);
+        if (fsize!=p->second.size) fprintf(global_log_file, " -> %1.0f", fsize+0.0);
+        fprintf(global_log_file, "\n");
       }
       assert(in!=FPNULL);
       fclose(in);
@@ -2611,9 +2655,9 @@ int Jidac::add() {
       is.write(p->first.c_str(), strlen(p->first.c_str()));
       is.put(0);
       if (summary<=0) {
-        printf("- ");
+        fprintf(global_log_file, "- ");
         printUTF8(p->first.c_str());
-        printf("\n");
+        fprintf(global_log_file, "\n");
       }
       ++removed;
       if (is.size()>16000) {
@@ -2636,14 +2680,14 @@ int Jidac::add() {
          || a->second.size!=p->second.size  // size change
          || (p->second.data && a->second.ptr!=p->second.ptr))) { // content
         if (summary<=0 && p->second.data==0) {  // not compressed?
-          if (a==dt.end() || a->second.date==0) printf("+ ");
-          else printf("# ");
+          if (a==dt.end() || a->second.date==0) fprintf(global_log_file, "+ ");
+          else fprintf(global_log_file, "# ");
           printUTF8(p->first.c_str());
           if (filename!=p->first) {
-            printf(" -> ");
+            fprintf(global_log_file, " -> ");
             printUTF8(filename.c_str());
           }
-          printf("\n");
+          fprintf(global_log_file, "\n");
         }
         ++added;
         puti(is, p->second.date, 8);
@@ -2671,7 +2715,7 @@ int Jidac::add() {
     }
     if (p==edt.end()) break;
   }
-  printf("%d +added, %d -removed.\n", added, removed);
+  fprintf(global_log_file, "%d +added, %d -removed.\n", added, removed);
   assert(is.size()==0);
 
   // Back up and write the header
@@ -2689,21 +2733,21 @@ int Jidac::add() {
       archive_end=header_pos;
     if (archive_end<archive_size) {
       if (archive_end>0) {
-        printf("truncating archive from %1.0f to %1.0f\n",
+        fprintf(global_log_file, "truncating archive from %1.0f to %1.0f\n",
             double(archive_size), double(archive_end));
         if (truncate(arcname.c_str(), archive_end)) printerr(archive.c_str());
       }
       else if (archive_end==0) {
         if (delete_file(arcname.c_str())) {
-          printf("deleted ");
+          fprintf(global_log_file, "deleted ");
           printUTF8(arcname.c_str());
-          printf("\n");
+          fprintf(global_log_file, "\n");
         }
       }
     }
   }
-  fflush(stdout);
-  fprintf(stderr, "\n%1.6f + (%1.6f -> %1.6f -> %1.6f) = %1.6f MB\n",
+  fflush(global_log_file);
+  fprintf(global_error_file, "\n%1.6f + (%1.6f -> %1.6f -> %1.6f) = %1.6f MB\n",
       header_pos/1000000.0, total_size/1000000.0, dedupesize/1000000.0,
       (archive_end-header_pos)/1000000.0, archive_end/1000000.0);
   return errors>0;
@@ -2860,7 +2904,7 @@ ThreadReturn decompressThread(void* arg) {
         lock(job.mutex);
         print_progress(job.total_size, job.total_done, job.jd.summary);
         if (job.jd.summary<=0)
-          printf("[%d..%d] -> %1.0f\n", b.start, b.start+b.size-1,
+          fprintf(global_log_file, "[%d..%d] -> %1.0f\n", b.start, b.start+b.size-1,
               out.size()+0.0);
         release(job.mutex);
         if (out.size()>=output_size) break;
@@ -2868,8 +2912,8 @@ ThreadReturn decompressThread(void* arg) {
       }
       if (out.size()<output_size) {
         lock(job.mutex);
-        fflush(stdout);
-        fprintf(stderr, "output [%d..%d] %d of %d bytes\n",
+        fflush(global_log_file);
+        fprintf(global_error_file, "output [%d..%d] %d of %d bytes\n",
              b.start, b.start+b.size-1, int(out.size()), output_size);
         release(job.mutex);
         error("unexpected end of compressed data");
@@ -2891,8 +2935,8 @@ ThreadReturn decompressThread(void* arg) {
         q+=job.jd.ht[j].usize;
         if (memcmp(sha1result, job.jd.ht[j].sha1, 20)) {
           lock(job.mutex);
-          fflush(stdout);
-          fprintf(stderr, "Job %d: fragment %u size %d checksum failed\n",
+          fflush(global_log_file);
+          fprintf(global_error_file, "Job %d: fragment %u size %d checksum failed\n",
                  jobNumber, j, job.jd.ht[j].usize);
           release(job.mutex);
           error("bad checksum");
@@ -2904,8 +2948,8 @@ ThreadReturn decompressThread(void* arg) {
     // If out of memory, let another thread try
     catch (std::bad_alloc& e) {
       lock(job.mutex);
-      fflush(stdout);
-      fprintf(stderr, "Job %d killed: %s\n", jobNumber, e.what());
+      fflush(global_log_file);
+      fprintf(global_error_file, "Job %d killed: %s\n", jobNumber, e.what());
       b.state=Block::READY;
       b.extracted=0;
       out.resize(0);
@@ -2916,8 +2960,8 @@ ThreadReturn decompressThread(void* arg) {
     // Other errors: assume bad input
     catch (std::exception& e) {
       lock(job.mutex);
-      fflush(stdout);
-      fprintf(stderr, "Job %d: skipping [%u..%u] at %1.0f: %s\n",
+      fflush(global_log_file);
+      fprintf(global_error_file, "Job %d: skipping [%u..%u] at %1.0f: %s\n",
               jobNumber, b.start+b.extracted, b.start+b.size-1,
               b.offset+0.0, e.what());
       release(job.mutex);
@@ -2964,14 +3008,17 @@ ThreadReturn decompressThread(void* arg) {
               lock(job.mutex);
               print_progress(job.total_size, job.total_done, job.jd.summary);
               if (job.jd.summary<=0) {
-                printf("> ");
+                fprintf(global_log_file, "> ");
                 printUTF8(filename.c_str());
-                printf("\n");
+                fprintf(global_log_file, "\n");
               }
               release(job.mutex);
             }
             if (!job.jd.dotest) {
-              job.outf=fopen(filename.c_str(), WB);
+              if (job.jd.topipe)
+                job.outf=stdout;
+              else
+                job.outf=fopen(filename.c_str(), WB);
               if (job.outf==FPNULL) {
                 lock(job.mutex);
                 printerr(filename.c_str());
@@ -3116,9 +3163,9 @@ int Jidac::extract() {
     OutputArchive out(repack, new_password, salt, 0);
     copy(in, out);
     printUTF8(archive.c_str());
-    printf(" %1.0f ", in.tell()+.0);
+    fprintf(global_log_file, " %1.0f ", in.tell()+.0);
     printUTF8(repack);
-    printf(" -> %1.0f\n", out.tell()+.0);
+    fprintf(global_log_file, " -> %1.0f\n", out.tell()+.0);
     out.close();
     return 0;
   }
@@ -3169,8 +3216,8 @@ int Jidac::extract() {
           || (hdr[hsize-22]&255)!=253  // start of SHA1 marker
           || (hdr[hsize-1]&255)!=255) {  // end of block marker
         for (int j=0; j<hsize; ++j)
-          printf("%d%c", hdr[j]&255, j%10==9 ? '\n' : ' ');
-        printf("at %1.0f\n", ver[i].offset+.0);
+          fprintf(global_log_file, "%d%c", hdr[j]&255, j%10==9 ? '\n' : ' ');
+        fprintf(global_log_file, "at %1.0f\n", ver[i].offset+.0);
         error("C block in weird format");
       }
       memcpy(hdr+hsize-34, 
@@ -3188,7 +3235,7 @@ int Jidac::extract() {
       if (copy(in, out, n)!=n) error("EOF");  // copy H and I blocks
     }
     printUTF8(index);
-    printf(" -> %1.0f\n", out.tell()+.0);
+    fprintf(global_log_file, " -> %1.0f\n", out.tell()+.0);
     out.close();
     return 0;
   }
@@ -3205,18 +3252,18 @@ int Jidac::extract() {
       const bool isdir=p->first[p->first.size()-1]=='/';
       if (!repack && !dotest && force && !isdir && equal(p, fn.c_str())) {
         if (summary<=0) {  // identical
-          printf("= ");
+          fprintf(global_log_file, "= ");
           printUTF8(fn.c_str());
-          printf("\n");
+          fprintf(global_log_file, "\n");
         }
         close(fn.c_str(), p->second.date, p->second.attr);
         ++skipped;
       }
       else if (!repack && !dotest && !force && exists(fn)) {  // exists, skip
         if (summary<=0) {
-          printf("? ");
+          fprintf(global_log_file, "? ");
           printUTF8(fn.c_str());
-          printf("\n");
+          fprintf(global_log_file, "\n");
         }
         ++skipped;
       }
@@ -3228,9 +3275,9 @@ int Jidac::extract() {
         for (unsigned i=0; p->second.data>=0 && i<p->second.ptr.size(); ++i) {
           unsigned j=p->second.ptr[i];  // fragment index
           if (j==0 || j>=ht.size() || ht[j].usize<-1) {
-            fflush(stdout);
-            printUTF8(p->first.c_str(), stderr);
-            fprintf(stderr, ": bad frag IDs, skipping...\n");
+            fflush(global_log_file);
+            printUTF8(p->first.c_str(), global_error_file);
+            fprintf(global_error_file, ": bad frag IDs, skipping...\n");
             p->second.data=-1;  // skip
             continue;
           }
@@ -3262,9 +3309,9 @@ int Jidac::extract() {
     }  // end if selected
   }  // end for
   if (!force && skipped>0)
-    printf("%d ?existing files skipped (-force overwrites).\n", skipped);
+    fprintf(global_log_file, "%d ?existing files skipped (-force overwrites).\n", skipped);
   if (force && skipped>0)
-    printf("%d =identical files skipped.\n", skipped);
+    fprintf(global_log_file, "%d =identical files skipped.\n", skipped);
 
   // Repack to new archive
   if (repack) {
@@ -3299,9 +3346,9 @@ int Jidac::extract() {
         copy(in, out, block[i].bsize);
       }
     }
-    printf("Data %1.0f -> ", csize+.0);
+    fprintf(global_log_file, "Data %1.0f -> ", csize+.0);
     csize=out.tell()-dstart;
-    printf("%1.0f\n", csize+.0);
+    fprintf(global_log_file, "%1.0f\n", csize+.0);
 
     // Re-create referenced H blocks using latest date
     for (unsigned i=0; i<block.size(); ++i) {
@@ -3354,9 +3401,9 @@ int Jidac::extract() {
 
     // Summarize result
     printUTF8(archive.c_str());
-    printf(" %1.0f -> ", sz+.0);
+    fprintf(global_log_file, " %1.0f -> ", sz+.0);
     printUTF8(repack);
-    printf(" %1.0f\n", out.tell()+.0);
+    fprintf(global_log_file, " %1.0f\n", out.tell()+.0);
 
     // Rewrite C block
     out.seek(cstart, SEEK_SET);
@@ -3366,7 +3413,7 @@ int Jidac::extract() {
   }
 
   // Decompress archive in parallel
-  printf("Extracting %1.6f MB in %d files -threads %d\n",
+  fprintf(global_log_file, "Extracting %1.6f MB in %d files -threads %d\n",
       job.total_size/1000000.0, total_files, threads);
   vector<ThreadID> tid(threads);
   for (unsigned i=0; i<tid.size(); ++i) run(tid[i], decompressThread, &job);
@@ -3407,9 +3454,9 @@ int Jidac::extract() {
                 dtptr=b.files[k];
                 lock(job.mutex);
                 if (summary<=0) {
-                  printf("> ");
+                  fprintf(global_log_file, "> ");
                   printUTF8(outname.c_str());
-                  printf("\n");
+                  fprintf(global_log_file, "\n");
                 }
                 if (!dotest) {
                   makepath(outname);
@@ -3449,14 +3496,14 @@ int Jidac::extract() {
         }
         catch(std::exception& e) {
           lock(job.mutex);
-          printf("Skipping block: %s\n", e.what());
+          fprintf(global_log_file, "Skipping block: %s\n", e.what());
           release(job.mutex);
         }
       }
     }
     if (outf!=FPNULL) fclose(outf);
   }
-  if (segments>0) printf("%u streaming segments extracted\n", segments);
+  if (segments>0) fprintf(global_log_file, "%u streaming segments extracted\n", segments);
 
   // Wait for threads to finish
   for (unsigned i=0; i<tid.size(); ++i) join(tid[i]);
@@ -3482,20 +3529,20 @@ int Jidac::extract() {
         && fn!="" && fn[fn.size()-1]!='/') {
       ++extracted;
       if (p->second.ptr.size()!=unsigned(p->second.data)) {
-        fflush(stdout);
+        fflush(global_log_file);
         if (++errors==1)
-          fprintf(stderr,
+          fprintf(global_error_file,
           "\nFailed (extracted/total fragments, file):\n");
-        fprintf(stderr, "%u/%u ",
+        fprintf(global_error_file, "%u/%u ",
                 int(p->second.data), int(p->second.ptr.size()));
-        printUTF8(fn.c_str(), stderr);
-        fprintf(stderr, "\n");
+        printUTF8(fn.c_str(), global_error_file);
+        fprintf(global_error_file, "\n");
       }
     }
   }
   if (errors>0) {
-    fflush(stdout);
-    fprintf(stderr,
+    fflush(global_log_file);
+    fprintf(global_error_file,
         "\nExtracted %u of %u files OK (%u errors)"
         " using %1.3f MB x %d threads\n",
         extracted-errors, extracted, errors, job.maxMemory/1000000,
@@ -3531,8 +3578,8 @@ int Jidac::list() {
   // Read external files into edt
   for (unsigned i=0; i<files.size(); ++i)
     scandir(files[i].c_str());
-  if (files.size()) printf("%d external files.\n", int(edt.size()));
-  printf("\n");
+  if (files.size()) fprintf(global_log_file, "%d external files.\n", int(edt.size()));
+  fprintf(global_log_file, "\n");
 
   // Compute directory sizes as the sum of their contents
   DTMap* dp[2]={&dt, &edt};
@@ -3616,10 +3663,10 @@ int Jidac::list() {
     if (!strchr(nottype.c_str(), p->second.data)) {
       if (p->first!="" && p->first[p->first.size()-1]!='/')
         usize+=p->second.size;
-      printf("%c %s %12.0f ", char(p->second.data),
+      fprintf(global_log_file, "%c %s %12.0f ", char(p->second.data),
           dateToString(p->second.date).c_str(), p->second.size+0.0);
       if (!noattributes)
-        printf("%s ", attrToString(p->second.attr).c_str());
+        fprintf(global_log_file, "%s ", attrToString(p->second.attr).c_str());
       printUTF8(p->first.c_str());
       if (summary<0) {  // frag pointers
         const vector<unsigned>& ptr=p->second.ptr;
@@ -3627,12 +3674,12 @@ int Jidac::list() {
         for (int j=0; j<int(ptr.size()); ++j) {
           if (j==0 || j==int(ptr.size())-1 || ptr[j]!=ptr[j-1]+1
               || ptr[j]!=ptr[j+1]-1) {
-            if (!hyphen) printf(" ");
+            if (!hyphen) fprintf(global_log_file, " ");
             hyphen=false;
-            printf("%d", ptr[j]);
+            fprintf(global_log_file, "%d", ptr[j]);
           }
           else {
-            if (!hyphen) printf("-");
+            if (!hyphen) fprintf(global_log_file, "-");
             hyphen=true;
           }
         }
@@ -3640,13 +3687,13 @@ int Jidac::list() {
       unsigned v;  // list version updates, deletes, compressed size
       if (all>0 && p->first.size()==all+1u && (v=atoi(p->first.c_str()))>0
           && v<ver.size()) {  // version info
-        printf(" +%d -%d -> %1.0f", ver[v].updates, ver[v].deletes,
+        fprintf(global_log_file, " +%d -%d -> %1.0f", ver[v].updates, ver[v].deletes,
             (v+1<ver.size() ? ver[v+1].offset : csize)-ver[v].offset+0.0);
         if (summary<0)  // print fragment range
-          printf(" %u-%u", ver[v].firstFragment,
+          fprintf(global_log_file, " %u-%u", ver[v].firstFragment,
               v+1<ver.size()?ver[v+1].firstFragment-1:unsigned(ht.size())-1);
       }
-      printf("\n");
+      fprintf(global_log_file, "\n");
     }
   }  // end for i = each file version
 
@@ -3674,7 +3721,7 @@ int Jidac::list() {
   }
 
   // Print archive statistics
-  printf("\n"
+  fprintf(global_log_file, "\n"
       "%1.6f MB of %1.6f MB (%d files) shown\n"
       "  -> %1.6f MB (%u refs to %u of %u frags) after dedupe\n"
       "  -> %1.6f MB compressed.\n",
@@ -3682,16 +3729,16 @@ int Jidac::list() {
        ddsize/1000000.0, refs, nfrags, unsigned(ht.size())-1,
        (csize+dhsize-dcsize)/1000000.0);
   if (unknown_frags)
-    printf("%d fragments have unknown size\n", unknown_frags);
+    fprintf(global_log_file, "%d fragments have unknown size\n", unknown_frags);
   if (files.size())
-    printf(
+    fprintf(global_log_file, 
        "%d =same, %d #different, %d +external, %d -internal\n",
         matches, mismatches, external, internal);
   if (summary>0)
-    printf("%d of largest %d files are ^duplicates\n",
+    fprintf(global_log_file, "%d of largest %d files are ^duplicates\n",
         duplicates, summary);
   if (dhsize!=dcsize)  // index?
-    printf("Note: %1.0f of %1.0f compressed bytes are in archive\n",
+    fprintf(global_log_file, "Note: %1.0f of %1.0f compressed bytes are in archive\n",
         dcsize+0.0, dhsize+0.0);
   return 0;
 }
@@ -3725,13 +3772,17 @@ int main() {
     errorcode=jidac.doCommand(argc, argv);
   }
   catch (std::exception& e) {
-    fflush(stdout);
-    fprintf(stderr, "zpaq error: %s\n", e.what());
+    fflush(global_log_file);
+    fprintf(global_error_file, "zpaq error: %s\n", e.what());
     errorcode=2;
   }
-  fflush(stdout);
-  fprintf(stderr, "%1.3f seconds %s\n", (mtime()-global_start)/1000.0,
+  fflush(global_log_file);
+  fprintf(global_error_file, "%1.3f seconds %s\n", (mtime()-global_start)/1000.0,
       errorcode>1 ? "(with errors)" :
       errorcode>0 ? "(with warnings)" : "(all OK)");
+
+  if (global_log_file != stdout)
+    fclose(global_log_file);
+
   return errorcode;
 }

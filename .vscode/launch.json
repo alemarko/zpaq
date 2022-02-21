@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${fileDirname}/zpaq",
-            "args": ["x", "~/Projects/das.zpaq", "S:/dir2/c.txt", "-to", "~/Projects/c.txt"],
+            "args": ["x", "~/Projects/das.zpaq", "S:/dir2/c.txt", "-topipe", "-logfile", "~/Projects/zpaq.log"],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],
