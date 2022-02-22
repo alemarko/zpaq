@@ -1111,7 +1111,7 @@ void Jidac::usage() {
 "  -to out...      Rename files... to out... or all to out/all.\n"
 "  -topipe         Outputs file to pipe (requires option -logfile to be used).\n"
 "  -logfile LF     Log file which will be used for both standard output and error.\n"
-"  -logappend      Used with -logfile to choose if the file will be appended or truncated (defult).\n"
+"  -logappend      Used with -logfile to choose if the file will be appended or truncated (default).\n"
 "  -until N        Roll back archive to N'th update or -N from end.\n"
 "  -until %s  Set date, roll back (UT, default time: 235959).\n"
 #ifndef NDEBUG
