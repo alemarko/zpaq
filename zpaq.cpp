@@ -126,6 +126,34 @@ void libzpaq::error(const char* msg) {
 }
 using libzpaq::error;
 
+
+// Code from 'https://github.com/facebook/zstd' to ensure 'stdout' is not console
+//
+/*-*********************************************
+*  Detect if isatty() and fileno() are available
+************************************************/
+#if (defined(__linux__) && (PLATFORM_POSIX_VERSION > 1)) \
+ || (PLATFORM_POSIX_VERSION >= 200112L) \
+ || defined(__DJGPP__)
+#  include <unistd.h>   /* isatty */
+#  include <stdio.h>    /* fileno */
+#  define IS_CONSOLE(stdStream) isatty(fileno(stdStream))
+#elif defined(MSDOS) || defined(OS2)
+#  include <io.h>       /* _isatty */
+#  define IS_CONSOLE(stdStream) _isatty(_fileno(stdStream))
+#elif defined(WIN32) || defined(_WIN32)
+#  include <io.h>      /* _isatty */
+#  include <windows.h> /* DeviceIoControl, HANDLE, FSCTL_SET_SPARSE */
+#  include <stdio.h>   /* FILE */
+static __inline int IS_CONSOLE(FILE* stdStream) {
+    DWORD dummy;
+    return _isatty(_fileno(stdStream)) && GetConsoleMode((HANDLE)_get_osfhandle(_fileno(stdStream)), &dummy);
+}
+#else
+#  define IS_CONSOLE(stdStream) 0
+#endif
+
+
 // Portable thread types and functions for Windows and Linux. Use like this:
 //
 // // Create mutex for locking thread-unsafe code
@@ -1219,9 +1247,18 @@ int Jidac::doCommand(int argc, const char** argv) {
 
   if (logfile == "") {
     if (topipe) {
+      fprintf(stdout, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
+         __DATE__ "\n");
       fprintf(stdout, "Option '-topipe' requires option '-logfile' to be set.\n");
       exit(1);
     }
+
+   if (IS_CONSOLE(stdout)) {
+    fprintf(stdout, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
+       __DATE__ "\n");
+      exit(1);
+   }
+
     global_log_file = stdout;
     global_error_file = stderr;
   }
