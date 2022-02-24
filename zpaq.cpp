@@ -154,6 +154,26 @@ static __inline int IS_CONSOLE(FILE* stdStream) {
 #endif
 
 
+// Code from 'https://github.com/facebook/zstd' to set 'stdout' to binary mode
+//
+#if defined(MSDOS) || defined(OS2) || defined(WIN32) || defined(_WIN32)
+#  include <fcntl.h>   /* _O_BINARY */
+#  include <io.h>      /* _setmode, _fileno, _get_osfhandle */
+#  if !defined(__DJGPP__)
+#    include <windows.h> /* DeviceIoControl, HANDLE, FSCTL_SET_SPARSE */
+#    include <winioctl.h> /* FSCTL_SET_SPARSE */
+#    define SET_BINARY_MODE(file) { int const unused=_setmode(_fileno(file), _O_BINARY); (void)unused; }
+#    define SET_SPARSE_FILE_MODE(file) { DWORD dw; DeviceIoControl((HANDLE) _get_osfhandle(_fileno(file)), FSCTL_SET_SPARSE, 0, 0, 0, 0, &dw, 0); }
+#  else
+#    define SET_BINARY_MODE(file) setmode(fileno(file), O_BINARY)
+#    define SET_SPARSE_FILE_MODE(file)
+#  endif
+#else
+#  define SET_BINARY_MODE(file)
+#  define SET_SPARSE_FILE_MODE(file)
+#endif
+
+
 // Portable thread types and functions for Windows and Linux. Use like this:
 //
 // // Create mutex for locking thread-unsafe code
@@ -1245,27 +1265,30 @@ int Jidac::doCommand(int argc, const char** argv) {
     }
   }
 
-  if (logfile == "") {
-    if (topipe) {
-      fprintf(stdout, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
-         __DATE__ "\n");
+  if (topipe) {
+    if (logfile == "") {
+      fprintf(stdout, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled " __DATE__ "\n");
       fprintf(stdout, "Option '-topipe' requires option '-logfile' to be set.\n");
       exit(1);
     }
 
-   if (IS_CONSOLE(stdout)) {
-    fprintf(stdout, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
-       __DATE__ "\n");
+    if (IS_CONSOLE(stdout)) {
+      fprintf(stdout, "zpaq v" ZPAQ_VERSION " journaling archiver, compiled " __DATE__ "\n");
+      fprintf(stdout, "Option '-topipe' does not work as stdout is a console, aborting.\n");
       exit(1);
     }
 
-    global_log_file = stdout;
-    global_error_file = stderr;
-  }
+    SET_BINARY_MODE(stdout);
+    
     makepath(logfile);
-    global_log_file = fopen(logfile.c_str(), logappend ? AB : WB);
+    global_log_file   = fopen(logfile.c_str(), logappend ? AB : WB);
     global_error_file = global_log_file;
   }
+  else {
+    global_log_file   = stdout;
+    global_error_file = stderr;
+  }
+
 
   // Get optional options
   for (int i=1; i<argc; ++i) {
