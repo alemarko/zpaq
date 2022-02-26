@@ -6,6 +6,9 @@ zpaq x archive.zpaq file_in_archive -topipe -logfile log_file -logappend
 # don't care about logging
 zpaq x archive.zpaq file_in_archive -topipe -logfile /dev/null
 
+# Windows (this works only in Command Prompt, Powershell will change file content)
+zpaq.exe x archive.zpaq file_in_archive -topipe -logfile NUL > file_name
+
 
 
 
