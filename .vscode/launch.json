@@ -5,6 +5,32 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Win run release",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${fileDirname}/zpaq.exe",
+            "args": ["list", "G:/a/ids.zpaq"],
+            //"args": ["x", "~/Projects/das.zpaq", "S:/dir2/c.txt", "-topipe", "-logfile", "~/Projects/zpaq.log"],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "console": "externalTerminal",
+            "preLaunchTask": "Win cl.exe build release"
+        },
+        {
+            "name": "Win debug",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${fileDirname}/zpaq.exe",
+            "args": ["list", "G:/a/ids.zpaq"],
+            //"args": ["x", "~/Projects/das.zpaq", "S:/dir2/c.txt", "-topipe", "-logfile", "~/Projects/zpaq.log"],
+            "stopAtEntry": true,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "console": "externalTerminal",
+            "preLaunchTask": "Win cl.exe build and debug"
+        },
+        {
             "name": "g++ - Build and debug zpaq",
             "type": "cppdbg",
             "request": "launch",
@@ -27,7 +53,7 @@
                     "ignoreFailures": true
                 }
             ],
-            "preLaunchTask": "C/C++: g++ build zpaq executable",
+            "preLaunchTask": "Linux g++ build zpaq executable",
             "miDebuggerPath": "/usr/bin/gdb"
         }
     ]

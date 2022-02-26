@@ -403,8 +403,6 @@ time_t unix_time(int64_t date) {
 
 /////////////////////////////// File //////////////////////////////////
 
-// Windows/Linux compatible file type
-#ifdef unix
 typedef FILE* FP;
 const FP FPNULL=NULL;
 const char* const RB="rb";
@@ -413,62 +411,15 @@ const char* const RBPLUS="rb+";
 const char* const WBPLUS="wb+";
 const char* const AB="ab";
 
-#else // Windows
-typedef HANDLE FP;
-const FP FPNULL=INVALID_HANDLE_VALUE;
-typedef enum {RB, WB, RBPLUS, WBPLUS} MODE;  // fopen modes
-
-// Open file. Only modes "rb", "wb", "rb+" and "wb+" are supported.
-FP fopen(const char* filename, MODE mode) {
-  assert(filename);
-  DWORD access=0;
-  if (mode!=WB) access=GENERIC_READ;
-  if (mode!=RB) access|=GENERIC_WRITE;
-  DWORD disp=OPEN_ALWAYS;  // wb or wb+
-  if (mode==RB || mode==RBPLUS) disp=OPEN_EXISTING;
-  DWORD share=FILE_SHARE_READ;
-  if (mode==RB) share|=FILE_SHARE_WRITE|FILE_SHARE_DELETE;
-  return CreateFile(utow(filename).c_str(), access, share,
-                    NULL, disp, FILE_ATTRIBUTE_NORMAL, NULL);
-}
-
-// Close file
-int fclose(FP fp) {
-  return CloseHandle(fp) ? 0 : EOF;
-}
-
-// Read nobj objects of size size into ptr. Return number of objects read.
-size_t fread(void* ptr, size_t size, size_t nobj, FP fp) {
-  DWORD r=0;
-  ReadFile(fp, ptr, size*nobj, &r, NULL);
-  if (size>1) r/=size;
-  return r;
-}
-
-// Write nobj objects of size size from ptr to fp. Return number written.
-size_t fwrite(const void* ptr, size_t size, size_t nobj, FP fp) {
-  DWORD r=0;
-  WriteFile(fp, ptr, size*nobj, &r, NULL);
-  if (size>1) r/=size;
-  return r;
-}
-
-// Move file pointer by offset. origin is SEEK_SET (from start), SEEK_CUR,
-// (from current position), or SEEK_END (from end).
+// Windows/Linux compatible file type
+#ifndef unix
 int fseeko(FP fp, int64_t offset, int origin) {
-  if (origin==SEEK_SET) origin=FILE_BEGIN;
-  else if (origin==SEEK_CUR) origin=FILE_CURRENT;
-  else if (origin==SEEK_END) origin=FILE_END;
-  LONG h=uint64_t(offset)>>32;
-  SetFilePointer(fp, offset&0xffffffffull, &h, origin);
-  return GetLastError()!=NO_ERROR;
+  return _fseeki64(fp, offset, origin);
 }
 
 // Get file position
 int64_t ftello(FP fp) {
-  LONG h=0;
-  DWORD r=SetFilePointer(fp, 0, &h, FILE_CURRENT);
-  return r+(uint64_t(h)<<32);
+  return _ftelli64(fp);
 }
 
 #endif
@@ -495,6 +446,31 @@ bool delete_file(const char* filename) {
   return DeleteFile(utow(filename).c_str());
 #endif
 }
+
+// Global variables
+FILE* global_log_file;  // it will be either file from argument above or stdout otherwise
+FILE* global_error_file;  // it will be either file from argument above or stderr otherwise
+
+// Print a UTF-8 string to f (stdout, stderr) so it displays properly
+void printUTF8(const char* s, FILE* f=global_log_file) {
+  assert(f);
+  assert(s);
+#ifdef unix
+  fprintf(f, "%s", s);
+#else
+  const HANDLE h=(HANDLE)_get_osfhandle(_fileno(f));
+  DWORD ft=GetFileType(h);
+  if (ft==FILE_TYPE_CHAR) {
+    fflush(f);
+    std::wstring w=utow(s, '/');  // Windows console: convert to UTF-16
+    DWORD n=0;
+    WriteConsole(h, w.c_str(), w.size(), &n, 0);
+  }
+  else  // stdout redirected to file
+    fprintf(f, "%s", s);
+#endif
+}
+
 
 #ifdef unix
 
@@ -530,29 +506,6 @@ void printerr(const char* filename) {
 
 #endif
 
-// Global variables
-FP global_log_file;  // it will be either file from argument above or stdout otherwise
-FP global_error_file;  // it will be either file from argument above or stderr otherwise
-
-// Print a UTF-8 string to f (stdout, stderr) so it displays properly
-void printUTF8(const char* s, FILE* f=global_log_file) {
-  assert(f);
-  assert(s);
-#ifdef unix
-  fprintf(f, "%s", s);
-#else
-  const HANDLE h=(HANDLE)_get_osfhandle(_fileno(f));
-  DWORD ft=GetFileType(h);
-  if (ft==FILE_TYPE_CHAR) {
-    fflush(f);
-    std::wstring w=utow(s, '/');  // Windows console: convert to UTF-16
-    DWORD n=0;
-    WriteConsole(h, w.c_str(), w.size(), &n, 0);
-  }
-  else  // stdout redirected to file
-    fprintf(f, "%s", s);
-#endif
-}
 
 // Close fp if open. Set date and attributes unless 0
 void close(const char* filename, int64_t date, int64_t attr, FP fp=FPNULL) {
@@ -570,11 +523,13 @@ void close(const char* filename, int64_t date, int64_t attr, FP fp=FPNULL) {
 #else
   const bool ads=strstr(filename, ":$DATA")!=0;  // alternate data stream?
   if (date>0 && !ads) {
-    if (fp==FPNULL)
-      fp=CreateFile(utow(filename).c_str(),
+    if (fp==FPNULL) {
+      auto f=CreateFile(utow(filename).c_str(),
                     FILE_WRITE_ATTRIBUTES,
                     FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
                     NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+      fp = (FP)f;
+    }
     if (fp!=FPNULL) {
       SYSTEMTIME st;
       st.wYear=date/10000000000LL%10000;
@@ -1257,7 +1212,7 @@ int Jidac::doCommand(int argc, const char** argv) {
   topipe = false;
   for (int i=1; i<argc; ++i) {
     const string opt=argv[i];
-        if (opt=="-logfile") logfile = argv[++i];
+    if (opt=="-logfile") logfile = argv[++i];
     else if (opt=="-logappend") logappend = true;
     else if (opt=="-topipe") {
       topipe=true;
@@ -3804,26 +3759,7 @@ int Jidac::list() {
 
 /////////////////////////////// main //////////////////////////////////
 
-// Convert argv to UTF-8 and replace \ with /
-#ifdef unix
 int main(int argc, const char** argv) {
-#else
-#ifdef _MSC_VER
-int wmain(int argc, LPWSTR* argw) {
-#else
-int main() {
-  int argc=0;
-  LPWSTR* argw=CommandLineToArgvW(GetCommandLine(), &argc);
-#endif
-  vector<string> args(argc);
-  libzpaq::Array<const char*> argp(argc);
-  for (int i=0; i<argc; ++i) {
-    args[i]=wtou(argw[i]);
-    argp[i]=args[i].c_str();
-  }
-  const char** argv=&argp[0];
-#endif
-
   global_start=mtime();  // get start time
   int errorcode=0;
   try {
