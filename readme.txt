@@ -1,4 +1,4 @@
-Added support for pipe output, example use:
+Added support for pipe output, example usage:
 
 # append output to log file
 zpaq x archive.zpaq file_in_archive -topipe -logfile log_file -logappend
